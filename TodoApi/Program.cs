@@ -1,79 +1,50 @@
 using Microsoft.EntityFrameworkCore;
+using Swashbuckle.AspNetCore.SwaggerGen;
+using TodoApi;
 
 var builder = WebApplication.CreateBuilder(args);
 
-var connectionString = builder.Configuration.GetConnectionString("Todos") ?? "Data Source=Todos.db";
+// Configure auth
+builder.Services.AddAuthentication().AddJwtBearer();
+builder.Services.AddAuthorization();
 
-builder.Services.AddEndpointsApiExplorer();
+// Configure the database
+var connectionString = builder.Configuration.GetConnectionString("Todos") ?? "Data Source=Todos.db";
 builder.Services.AddSqlite<TodoDbContext>(connectionString);
-builder.Services.AddSwaggerGen(c =>
-{
-    c.SwaggerDoc("v1", new() { Title = builder.Environment.ApplicationName, Version = "v1" });
-});
+
+// Configure Open API
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+builder.Services.Configure<SwaggerGeneratorOptions>(o => o.InferSecuritySchemes = true);
+
+// Configure rate limiting
+builder.Services.AddRateLimiting();
+
+// Configure OpenTelemetry
+builder.AddOpenTelemetry();
 
 var app = builder.Build();
 
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
-    app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", $"{builder.Environment.ApplicationName} v1"));
+    app.UseSwaggerUI();
 }
 
-app.MapFallback(() => Results.Redirect("/swagger"));
+app.UseRateLimiter();
 
-app.MapGet("/todos", async (TodoDbContext db) =>
-{
-    return await db.Todos.ToListAsync();
-});
+app.Map("/", () => Results.Redirect("/swagger"));
 
-app.MapGet("/todos/{id}", async (TodoDbContext db, int id) =>
-{
-    return await db.Todos.FindAsync(id) switch
-    {
-        Todo todo => Results.Ok(todo),
-        null => Results.NotFound()
-    };
-});
+// Configure the APIs
+var group = app.MapGroup("/todos");
 
-app.MapPost("/todos", async (TodoDbContext db, Todo todo) =>
-{
-    await db.Todos.AddAsync(todo);
-    await db.SaveChangesAsync();
+group.MapTodos()
+     .RequireAuthorization(pb => pb.RequireClaim("id"))
+     .AddOpenApiSecurityRequirement();
 
-    return Results.Created($"/todo/{todo.Id}", todo);
-});
-
-app.MapPut("/todos/{id}", async (TodoDbContext db, int id, Todo todo) =>
-{
-    if (id != todo.Id)
-    {
-        return Results.BadRequest();
-    }
-
-    if (!await db.Todos.AnyAsync(x => x.Id == id))
-    {
-        return Results.NotFound();
-    }
-
-    db.Update(todo);
-    await db.SaveChangesAsync();
-
-    return Results.Ok();
-});
-
-
-app.MapDelete("/todos/{id}", async (TodoDbContext db, int id) =>
-{
-    var todo = await db.Todos.FindAsync(id);
-    if (todo is null)
-    {
-        return Results.NotFound();
-    }
-
-    db.Todos.Remove(todo);
-    await db.SaveChangesAsync();
-
-    return Results.Ok();
-});
+// Configure the prometheus endpoint for scraping metrics
+app.MapPrometheusScrapingEndpoint();
+// NOTE: This should only be exposed on an internal port!
+// .RequireHost("*:9100");
 
 app.Run();

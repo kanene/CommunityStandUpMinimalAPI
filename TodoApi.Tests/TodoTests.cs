@@ -1,89 +1,196 @@
-using System.Collections.Generic;
-using System.Linq;
 using System.Net;
 using System.Net.Http.Json;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Storage;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.DependencyInjection.Extensions;
-using Microsoft.Extensions.Hosting;
+using Microsoft.AspNetCore.Mvc;
 using Xunit;
 
-namespace Sample.Tests
+namespace TodoApi.Tests;
+
+public class TodoTests
 {
-    public class TodoTests
+    [Fact]
+    public async Task GetTodos()
     {
-        [Fact]
-        public async Task GetTodos()
-        {
-            await using var application = new TodoApplication();
+        var userId = "34";
 
-            var client = application.CreateClient();
-            var todos = await client.GetFromJsonAsync<List<Todo>>("/todos");
+        await using var application = new TodoApplication();
+        using var db = application.CreateTodoDbContext();
 
-            Assert.Empty(todos);
-        }
+        db.Todos.Add(new Todo { Title = "Thing one I have to do", OwnerId = userId });
 
-        [Fact]
-        public async Task PostTodos()
-        {
-            await using var application = new TodoApplication();
+        await db.SaveChangesAsync();
 
-            var client = application.CreateClient();
-            var response = await client.PostAsJsonAsync("/todos", new Todo { Title = "I want to do this thing tomorrow" });
+        var client = application.CreateClient(userId);
+        var todos = await client.GetFromJsonAsync<List<Todo>>("/todos");
+        Assert.NotNull(todos);
 
-            Assert.Equal(HttpStatusCode.Created, response.StatusCode);
-
-            var todos = await client.GetFromJsonAsync<List<Todo>>("/todos");
-
-            var todo = Assert.Single(todos);
-            Assert.Equal("I want to do this thing tomorrow", todo.Title);
-            Assert.False(todo.IsComplete);
-        }
-
-        [Fact]
-        public async Task DeleteTodos()
-        {
-            await using var application = new TodoApplication();
-
-            var client = application.CreateClient();
-            var response = await client.PostAsJsonAsync("/todos", new Todo { Title = "I want to do this thing tomorrow" });
-
-            Assert.Equal(HttpStatusCode.Created, response.StatusCode);
-
-            var todos = await client.GetFromJsonAsync<List<Todo>>("/todos");
-
-            var todo = Assert.Single(todos);
-            Assert.Equal("I want to do this thing tomorrow", todo.Title);
-            Assert.False(todo.IsComplete);
-
-            response = await client.DeleteAsync($"/todos/{todo.Id}");
-
-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-
-            response = await client.GetAsync($"/todos/{todo.Id}");
-
-            Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
-        }
+        var todo = Assert.Single(todos);
+        Assert.Equal("Thing one I have to do", todo.Title);
+        Assert.Equal(userId, todo.OwnerId);
     }
 
-    class TodoApplication : WebApplicationFactory<Program>
+    [Fact]
+    public async Task PostTodos()
     {
-        protected override IHost CreateHost(IHostBuilder builder)
-        {
-            var root = new InMemoryDatabaseRoot();
+        var userId = "34";
+        await using var application = new TodoApplication();
+        using var db = application.CreateTodoDbContext();
 
-            builder.ConfigureServices(services =>
-            {
-                services.RemoveAll(typeof(DbContextOptions<TodoDbContext>));
+        var client = application.CreateClient(userId);
+        var response = await client.PostAsJsonAsync("/todos", new Todo { Title = "I want to do this thing tomorrow" });
 
-                services.AddDbContext<TodoDbContext>(options =>
-                    options.UseInMemoryDatabase("Testing", root));
-            });
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
 
-            return base.CreateHost(builder);
-        }
+        var todos = await client.GetFromJsonAsync<List<Todo>>("/todos");
+        Assert.NotNull(todos);
+
+        var todo = Assert.Single(todos);
+        Assert.Equal("I want to do this thing tomorrow", todo.Title);
+        Assert.False(todo.IsComplete);
+    }
+
+    [Fact]
+    public async Task DeleteTodos()
+    {
+        var userId = "34";
+
+        await using var application = new TodoApplication();
+        using var db = application.CreateTodoDbContext();
+
+        db.Todos.Add(new Todo { Title = "I want to do this thing tomorrow", OwnerId = userId });
+
+        await db.SaveChangesAsync();
+
+        var client = application.CreateClient(userId);
+
+        var todo = db.Todos.FirstOrDefault();
+        Assert.NotNull(todo);
+        Assert.Equal("I want to do this thing tomorrow", todo.Title);
+        Assert.False(todo.IsComplete);
+
+        var response = await client.DeleteAsync($"/todos/{todo.Id}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        todo = db.Todos.FirstOrDefault();
+        Assert.Null(todo);
+    }
+
+    [Fact]
+    public async Task CanOnlyGetTodosPostedBySameUser()
+    {
+        var userId0 = "34";
+        var userId1 = "35";
+
+        await using var application = new TodoApplication();
+        using var db = application.CreateTodoDbContext();
+
+        db.Todos.Add(new Todo { Title = "I want to do this thing tomorrow", OwnerId = userId0 });
+
+        await db.SaveChangesAsync();
+
+        var client0 = application.CreateClient(userId0);
+        var client1 = application.CreateClient(userId1);
+
+        var todos0 = await client0.GetFromJsonAsync<List<Todo>>("/todos");
+        Assert.NotNull(todos0);
+
+        var todos1 = await client1.GetFromJsonAsync<List<Todo>>("/todos");
+        Assert.NotNull(todos1);
+
+        Assert.Empty(todos1);
+
+        var todo = Assert.Single(todos0);
+        Assert.Equal("I want to do this thing tomorrow", todo.Title);
+        Assert.False(todo.IsComplete);
+
+        var todo0 = await client0.GetFromJsonAsync<Todo>($"/todos/{todo.Id}");
+        Assert.NotNull(todo0);
+
+        var response = await client1.GetAsync($"/todos/{todo.Id}");
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PostingTodoWithoutTitleReturnsProblemDetails()
+    {
+        var userId = "34";
+        await using var application = new TodoApplication();
+
+        var client = application.CreateClient(userId);
+        var response = await client.PostAsJsonAsync("/todos", new Todo { });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+
+        var problemDetails = await response.Content.ReadFromJsonAsync<ValidationProblemDetails>();
+        Assert.NotNull(problemDetails);
+
+        Assert.Equal("One or more validation errors occurred.", problemDetails.Title);
+        Assert.NotEmpty(problemDetails.Errors);
+        Assert.Equal(new[] { "A title is required" }, problemDetails.Errors["title"]);
+    }
+
+    [Fact]
+    public async Task CannotDeleteUnownedTodos()
+    {
+        var userId0 = "34";
+        var userId1 = "35";
+
+        await using var application = new TodoApplication();
+        using var db = application.CreateTodoDbContext();
+
+        db.Todos.Add(new Todo { Title = "I want to do this thing tomorrow", OwnerId = userId0 });
+
+        await db.SaveChangesAsync();
+
+        var client0 = application.CreateClient(userId0);
+        var client1 = application.CreateClient(userId1);
+
+        var todos = await client0.GetFromJsonAsync<List<Todo>>("/todos");
+        Assert.NotNull(todos);
+
+        var todo = Assert.Single(todos);
+        Assert.Equal("I want to do this thing tomorrow", todo.Title);
+        Assert.False(todo.IsComplete);
+
+        var response = await client1.DeleteAsync($"/todos/{todo.Id}");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+
+        var undeletedTodo = db.Todos.FirstOrDefault();
+        Assert.NotNull(undeletedTodo);
+
+        Assert.Equal(todo.Title, undeletedTodo.Title);
+        Assert.Equal(todo.Id, undeletedTodo.Id);
+    }
+
+    [Fact]
+    public async Task AdminCanDeleteUnownedTodos()
+    {
+        var userId = "34";
+        var adminUserId = "35";
+
+        await using var application = new TodoApplication();
+        using var db = application.CreateTodoDbContext();
+
+        db.Todos.Add(new Todo { Title = "I want to do this thing tomorrow", OwnerId = userId });
+
+        await db.SaveChangesAsync();
+
+        var client = application.CreateClient(userId);
+        var adminClient = application.CreateClient(adminUserId, isAdmin: true);
+
+        var todos = await client.GetFromJsonAsync<List<Todo>>("/todos");
+        Assert.NotNull(todos);
+
+        var todo = Assert.Single(todos);
+        Assert.Equal("I want to do this thing tomorrow", todo.Title);
+        Assert.False(todo.IsComplete);
+
+        var response = await adminClient.DeleteAsync($"/todos/{todo.Id}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var undeletedTodo = db.Todos.FirstOrDefault();
+        Assert.Null(undeletedTodo);
     }
 }
